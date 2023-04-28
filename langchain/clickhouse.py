@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import warnings
+from typing import Any, Iterable, List, Optional
+import clickhouse_connect
+from sqlalchemy.schema import CreateTable
+from sqlalchemy.engine import create_engine
+from sqlalchemy import MetaData
+
+class ClickHouseDataBase:
+    """ClickHouse wrapper for database operations."""
+
+    def __init__(
+        self,
+        database: str,
+        host: str,
+        port: int = 9000,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        readonly: bool = False,
+        include_tables: Optional[List[str]] = None,
+        ignore_tables: Optional[List[str]] = None,
+        custom_table_info: Optional[dict] = None,
+    ):
+        """
+        Create a ClickHouse database connection.
+
+        Args:
+            database: The name of the database to connect to.
+            host: The host name or IP address of the ClickHouse server.
+            port: The port number to use for the ClickHouse server.
+            user: The user name to use for authentication.
+            password: The password to use for authentication.
+            readonly: Set to True to create a read-only connection.
+            include_tables: A list of table names to include in the usable tables.
+            ignore_tables: A list of table names to ignore in the usable tables.
+            custom_table_info: A dictionary mapping table names to custom table info.
+        """
+        self._conn = clickhouse_connect.get_client(
+            host=host, port=port, user=user, password=password, database=database
+        )
+
+        self._readonly = readonly
+        self._include_tables = set(include_tables) if include_tables else set()
+        self._ignore_tables = set(ignore_tables) if ignore_tables else set()
+        self._all_tables = set(self.get_all_table_names())
+        
+        usable_tables = self.get_usable_table_names()
+        self._usable_tables = set(usable_tables)
+
+        if self._include_tables and self._ignore_tables:
+            raise ValueError("Cannot specify both include_tables and ignore_tables")
+
+        if self._include_tables:
+            missing_tables = self._include_tables - self._all_tables
+            if missing_tables:
+                raise ValueError(
+                    f"include_tables {missing_tables} not found in database"
+                )
+            self._usable_tables = self._include_tables
+        else:
+            self._usable_tables = self._all_tables - self._ignore_tables
+
+        self._custom_table_info = custom_table_info or {}
+        if self._custom_table_info:
+            if not isinstance(self._custom_table_info, dict):
+                raise TypeError(
+                    "table_info must be a dictionary with table names as keys and the "
+                    "desired table info as values"
+                )
+            # only keep the tables that are also present in the database
+            intersection = set(self._custom_table_info).intersection(self._usable_tables)
+            self._custom_table_info = dict(
+                (table, self._custom_table_info[table])
+                for table in self._custom_table_info
+                if table in intersection
+            )
+
+
+        if not isinstance(readonly, bool):
+            raise TypeError("readonly must be a boolean")
+        self._readonly = readonly
+
+    def get_usable_table_names(self) -> Iterable[str]:
+        """Get names of tables available."""
+        if self._include_tables:
+            return self._include_tables
+        return self._include_tables - self._ignore_tables
+
+    def get_table_names(self) -> Iterable[str]:
+        """Get names of tables available."""
+        warnings.warn(
+            "This method is deprecated - please use `get_usable_table_names`."
+        )
+        return self.get_usable_table_names()
+    
+    def get_all_table_names(self) -> List[str]:
+        query = "SHOW TABLES"
+        if self._readonly:
+            query += " WHERE engine != 'Distributed'"
+        result = self._conn.query(query)
+        table_names = [row[0] for row in result.result_rows]
+        print("table_names", table_names)
+        return table_names
+
+    def get_table_info(self, table_names: Optional[List[str]] = None) -> str:
+        """Get information about specified tables.
+
+        Follows best practices as specified in: Rajkumar et al, 2022
+        (https://arxiv.org/abs/2204.00498)
+
+        If `sample_rows_in_table_info`, the specified number of sample rows will be
+        appended to each table description. This can increase performance as
+        demonstrated in the paper.
+        """
+        all_table_names = self.get_usable_table_names()
+        if table_names is not None:
+            missing_tables = set(table_names).difference(all_table_names)
+            if missing_tables:
+                raise ValueError(f"table_names {missing_tables} not found in database")
+            all_table_names = table_names
+
+        engine = create_engine(self.db.uri)
+        metadata = MetaData(bind=engine)
+        metadata.reflect(engine, views=True, only=all_table_names)
+
+        tables = []
+        for table_name in all_table_names:
+            table = metadata.tables[table_name]
+            if self._custom_table_info and table_name in self._custom_table_info:
+                tables.append(self._custom_table_info[table_name])
+                continue
+
+            # add create table command
+            create_table = str(CreateTable(table).compile(engine))
+            table_info = f"{create_table.rstrip()}"
+            has_extra_info = (
+                self._indexes_in_table_info or self._sample_rows_in_table_info
+            )
+            if has_extra_info:
+                table_info += "\n\n/*"
+            if self._indexes_in_table_info:
+                table_info += f"\n{self._get_table_indexes(table)}\n"
+            if self._sample_rows_in_table_info:
+                table_info += f"\n{self._get_sample_rows(table)}\n"
+            if has_extra_info:
+                table_info += "*/"
+            tables.append(table_info)
+        final_str = "\n\n".join(tables)
+        return final_str
+
+    def get_table_info_no_throw(self, table_names: Optional[List[str]] = None) -> str:
+        """Get information about specified tables.
+
+        Follows best practices as specified in: Rajkumar et al, 2022
+        (https://arxiv.org/abs/2204.00498)
+
+        If `sample_rows_in_table_info`, the specified number of sample rows will be
+        appended to each table description. This can increase performance as
+        demonstrated in the paper.
+        """
+        try:
+            return self.get_table_info(table_names)
+        except ValueError as e:
+            """Format the error message"""
+            return f"Error: {e}"
+    
+    @classmethod
+    def get_client(
+        cls, host: str, port: int, user: str, password: str, database: str, **kwargs: Any
+    ) -> ClickHouseDataBase:
+        """Construct a SQLAlchemy engine from URI."""
+        # _engine_args = engine_args or {}
+        client = clickhouse_connect.get_client(host, user, port, password, database, **kwargs)
+        return client
+    
+    @property
+    def dialect(self) -> str:
+        """Return string representation of dialect to use."""
+        return "clickhouse"

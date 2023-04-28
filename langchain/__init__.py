@@ -54,6 +54,7 @@ from langchain.utilities.serpapi import SerpAPIWrapper
 from langchain.utilities.wikipedia import WikipediaAPIWrapper
 from langchain.utilities.wolfram_alpha import WolframAlphaAPIWrapper
 from langchain.vectorstores import FAISS, ElasticVectorSearch
+from langchain.clickhouse import ClickHouseDataBase
 
 __version__ = metadata.version(__package__)
 del metadata  # optional, avoids polluting the results of dir(__package__)
@@ -112,4 +113,5 @@ __all__ = [
     "set_handler",
     "set_tracing_callback_manager",
     "LlamaCpp",
+    "ClickHouseDataBase"
 ]

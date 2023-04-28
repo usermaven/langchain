@@ -21,6 +21,8 @@ from langchain.agents.agent_toolkits.vectorstore.toolkit import (
     VectorStoreToolkit,
 )
 from langchain.agents.agent_toolkits.zapier.toolkit import ZapierToolkit
+from langchain.agents.agent_toolkits.clickhouse.base import create_clickhouse_agent
+from langchain.agents.agent_toolkits.clickhouse.toolkit import ClickHouseDatabaseToolkit
 
 __all__ = [
     "create_json_agent",
@@ -40,4 +42,6 @@ __all__ = [
     "create_csv_agent",
     "ZapierToolkit",
     "JiraToolkit",
+    "create_clickhouse_agent",
+    "ClickHouseDatabaseToolkit",
 ]
