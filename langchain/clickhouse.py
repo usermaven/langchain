@@ -21,6 +21,8 @@ class ClickHouseDataBase:
         include_tables: Optional[List[str]] = None,
         ignore_tables: Optional[List[str]] = None,
         custom_table_info: Optional[dict] = None,
+        sample_rows_in_table_info: int = 2,
+        indexes_in_table_info: bool = False,
     ):
         """
         Create a ClickHouse database connection.
@@ -41,6 +43,8 @@ class ClickHouseDataBase:
         )
 
         self._readonly = readonly
+        self._indexes_in_table_info = indexes_in_table_info
+        self._sample_rows_in_table_info = sample_rows_in_table_info
         self._include_tables = set(include_tables) if include_tables else set()
         self._ignore_tables = set(ignore_tables) if ignore_tables else set()
         self._all_tables = set(self.get_all_table_names())
@@ -50,16 +54,6 @@ class ClickHouseDataBase:
 
         if self._include_tables and self._ignore_tables:
             raise ValueError("Cannot specify both include_tables and ignore_tables")
-
-        if self._include_tables:
-            missing_tables = self._include_tables - self._all_tables
-            if missing_tables:
-                raise ValueError(
-                    f"include_tables {missing_tables} not found in database"
-                )
-            self._usable_tables = self._include_tables
-        else:
-            self._usable_tables = self._all_tables - self._ignore_tables
 
         self._custom_table_info = custom_table_info or {}
         if self._custom_table_info:
@@ -82,10 +76,17 @@ class ClickHouseDataBase:
         self._readonly = readonly
 
     def get_usable_table_names(self) -> Iterable[str]:
-        """Get names of tables available."""
+        """Get names of tables available."""  
         if self._include_tables:
-            return self._include_tables
-        return self._include_tables - self._ignore_tables
+            missing_tables = self._include_tables - self._all_tables
+            if missing_tables:
+                raise ValueError(
+                    f"include_tables {missing_tables} not found in database"
+                )
+            usable_tables = self._include_tables
+        else:
+            usable_tables = self._all_tables - self._ignore_tables      
+        return usable_tables
 
     def get_table_names(self) -> Iterable[str]:
         """Get names of tables available."""
@@ -100,7 +101,6 @@ class ClickHouseDataBase:
             query += " WHERE engine != 'Distributed'"
         result = self._conn.query(query)
         table_names = [row[0] for row in result.result_rows]
-        print("table_names", table_names)
         return table_names
 
     def get_table_info(self, table_names: Optional[List[str]] = None) -> str:
@@ -120,32 +120,52 @@ class ClickHouseDataBase:
                 raise ValueError(f"table_names {missing_tables} not found in database")
             all_table_names = table_names
 
-        engine = create_engine(self.db.uri)
-        metadata = MetaData(bind=engine)
-        metadata.reflect(engine, views=True, only=all_table_names)
 
         tables = []
         for table_name in all_table_names:
-            table = metadata.tables[table_name]
+            table_query = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE (table_schema = currentDatabase() OR table_schema = '') AND table_name LIKE '{table_name}'"
+            table_result = self._conn.query(table_query)
+            table_info_column_names = [column for column in table_result.column_names]
+            table_info_columns = [column[0] for column in table_result.result_columns]
+            table_info = f"{str(table_info_column_names)}\n{str(table_info_columns)}"
+            
             if self._custom_table_info and table_name in self._custom_table_info:
                 tables.append(self._custom_table_info[table_name])
                 continue
 
-            # add create table command
-            create_table = str(CreateTable(table).compile(engine))
-            table_info = f"{create_table.rstrip()}"
             has_extra_info = (
                 self._indexes_in_table_info or self._sample_rows_in_table_info
             )
             if has_extra_info:
                 table_info += "\n\n/*"
             if self._indexes_in_table_info:
-                table_info += f"\n{self._get_table_indexes(table)}\n"
+                indexes_query = f"SELECT * FROM system.parts WHERE database = '{table_name.split('.')[0]}' AND table = '{table_name.split('.')[1]}' AND name LIKE '%skp%' ORDER BY part"
+                indexes_result = self._conn.command(indexes_query)
+                indexes = ""
+                for row in indexes_result:
+                    indexes += f"ALTER TABLE {table_name} ATTACH PART '{row['name']}'"
+                table_info += f"\n{indexes}\n"
             if self._sample_rows_in_table_info:
-                table_info += f"\n{self._get_sample_rows(table)}\n"
+                try: 
+                    sample_query = f"SELECT * FROM {table_name} SAMPLE 0.3 LIMIT {self._sample_rows_in_table_info}"
+                    sample_result = self._conn.query(sample_query)
+                    columns = [column for column in sample_result.column_names]
+                    rows = [tuple(row) for row in sample_result.result_rows]
+                    sample_rows = "\n".join([str(row) for row in rows])
+                    table_info += f"\n\n-- Sample Rows:\n-- {', '.join(columns)}\n{sample_rows}\n"
+                except Exception:
+                    print(f"Table {table_name} cannot be sampled")
+                    sample_query = f"SELECT * FROM {table_name} LIMIT {self._sample_rows_in_table_info}"
+                    sample_result = self._conn.query(sample_query)
+                    columns = [column for column in sample_result.column_names]
+                    rows = [tuple(row) for row in sample_result.result_rows]
+                    sample_rows = "\n".join([str(row) for row in rows])
+                    table_info += f"\n\n-- Sample Rows:\n-- {', '.join(columns)}\n{sample_rows}\n"
+
             if has_extra_info:
                 table_info += "*/"
             tables.append(table_info)
+
         final_str = "\n\n".join(tables)
         return final_str
 
@@ -165,6 +185,24 @@ class ClickHouseDataBase:
             """Format the error message"""
             return f"Error: {e}"
     
+    def run_no_throw(self, command: str) -> str:
+        """Execute a clickhouse command and return a string representing the results.
+
+        If the statement returns rows, a string of the results is returned.
+        If the statement returns no rows, an empty string is returned.
+
+        If the statement throws an error, the error message is returned.
+        """
+        try:
+            command_result = self._conn.command(command)
+            if command_result:
+                return str(command_result)
+            else:
+                return ""
+        except Exception as e:
+            """Format the error message"""
+            return f"Error: {e}"
+
     @classmethod
     def get_client(
         cls, host: str, port: int, user: str, password: str, database: str, **kwargs: Any
