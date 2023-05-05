@@ -3,9 +3,6 @@ from __future__ import annotations
 import warnings
 from typing import Any, Iterable, List, Optional
 import clickhouse_connect
-from sqlalchemy.schema import CreateTable
-from sqlalchemy.engine import create_engine
-from sqlalchemy import MetaData
 
 class ClickHouseDataBase:
     """ClickHouse wrapper for database operations."""
@@ -123,11 +120,10 @@ class ClickHouseDataBase:
 
         tables = []
         for table_name in all_table_names:
-            table_query = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE (table_schema = currentDatabase() OR table_schema = '') AND table_name LIKE '{table_name}'"
+            table_query = f"SELECT * FROM {table_name} LIMIT 1"
             table_result = self._conn.query(table_query)
             table_info_column_names = [column for column in table_result.column_names]
-            table_info_columns = [column[0] for column in table_result.result_columns]
-            table_info = f"{str(table_info_column_names)}\n{str(table_info_columns)}"
+            table_info = f"{str(table_info_column_names)}"
             
             if self._custom_table_info and table_name in self._custom_table_info:
                 tables.append(self._custom_table_info[table_name])
@@ -145,22 +141,6 @@ class ClickHouseDataBase:
                 for row in indexes_result:
                     indexes += f"ALTER TABLE {table_name} ATTACH PART '{row['name']}'"
                 table_info += f"\n{indexes}\n"
-            if self._sample_rows_in_table_info:
-                try: 
-                    sample_query = f"SELECT * FROM {table_name} SAMPLE 0.3 LIMIT {self._sample_rows_in_table_info}"
-                    sample_result = self._conn.query(sample_query)
-                    columns = [column for column in sample_result.column_names]
-                    rows = [tuple(row) for row in sample_result.result_rows]
-                    sample_rows = "\n".join([str(row) for row in rows])
-                    table_info += f"\n\n-- Sample Rows:\n-- {', '.join(columns)}\n{sample_rows}\n"
-                except Exception:
-                    print(f"Table {table_name} cannot be sampled")
-                    sample_query = f"SELECT * FROM {table_name} LIMIT {self._sample_rows_in_table_info}"
-                    sample_result = self._conn.query(sample_query)
-                    columns = [column for column in sample_result.column_names]
-                    rows = [tuple(row) for row in sample_result.result_rows]
-                    sample_rows = "\n".join([str(row) for row in rows])
-                    table_info += f"\n\n-- Sample Rows:\n-- {', '.join(columns)}\n{sample_rows}\n"
 
             if has_extra_info:
                 table_info += "*/"
