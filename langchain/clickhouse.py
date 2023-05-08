@@ -120,10 +120,10 @@ class ClickHouseDataBase:
 
         tables = []
         for table_name in all_table_names:
-            table_query = f"SELECT * FROM {table_name} LIMIT 1"
+            table_query = f"DESCRIBE {table_name}"
             table_result = self._conn.query(table_query)
-            table_info_column_names = [column for column in table_result.column_names]
-            table_info = f"{str(table_info_column_names)}"
+            table_column_names = [row[0] for row in table_result.result_rows]
+            table_info = f"{str(table_column_names)}"
             
             if self._custom_table_info and table_name in self._custom_table_info:
                 tables.append(self._custom_table_info[table_name])
