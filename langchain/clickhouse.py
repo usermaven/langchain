@@ -14,7 +14,6 @@ class ClickHouseDataBase:
         port: int = 9000,
         user: Optional[str] = None,
         password: Optional[str] = None,
-        readonly: bool = False,
         include_tables: Optional[List[str]] = None,
         ignore_tables: Optional[List[str]] = None,
         custom_table_info: Optional[dict] = None,
@@ -30,16 +29,14 @@ class ClickHouseDataBase:
             port: The port number to use for the ClickHouse server.
             user: The user name to use for authentication.
             password: The password to use for authentication.
-            readonly: Set to True to create a read-only connection.
             include_tables: A list of table names to include in the usable tables.
             ignore_tables: A list of table names to ignore in the usable tables.
             custom_table_info: A dictionary mapping table names to custom table info.
         """
         self._conn = clickhouse_connect.get_client(
-            host=host, port=port, user=user, password=password, database=database
+            host=host, port=port, user=user, password=password, database=database,
         )
 
-        self._readonly = readonly
         self._indexes_in_table_info = indexes_in_table_info
         self._sample_rows_in_table_info = sample_rows_in_table_info
         self._include_tables = set(include_tables) if include_tables else set()
@@ -67,11 +64,6 @@ class ClickHouseDataBase:
                 if table in intersection
             )
 
-
-        if not isinstance(readonly, bool):
-            raise TypeError("readonly must be a boolean")
-        self._readonly = readonly
-
     def get_usable_table_names(self) -> Iterable[str]:
         """Get names of tables available."""  
         if self._include_tables:
@@ -94,8 +86,6 @@ class ClickHouseDataBase:
     
     def get_all_table_names(self) -> List[str]:
         query = "SHOW TABLES"
-        if self._readonly:
-            query += " WHERE engine != 'Distributed'"
         result = self._conn.query(query)
         table_names = [row[0] for row in result.result_rows]
         return table_names
