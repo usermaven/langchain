@@ -17,7 +17,7 @@ class ClickHouseDataBase:
         include_tables: Optional[List[str]] = None,
         ignore_tables: Optional[List[str]] = None,
         custom_table_info: Optional[dict] = None,
-        sample_rows_in_table_info: int = 2,
+        sample_rows_in_table_info: int = 0,
         indexes_in_table_info: bool = False,
     ):
         """
@@ -31,12 +31,15 @@ class ClickHouseDataBase:
             password: The password to use for authentication.
             include_tables: A list of table names to include in the usable tables.
             ignore_tables: A list of table names to ignore in the usable tables.
-            custom_table_info: A dictionary mapping table names to custom table info.
+            custom_table_info: A dictionary mapping table names to custom table info. This will overwrite the default table info.
+            sample_rows_in_table_info: The number of sample rows to include in the table info. The table must have sampling enabled or this will throw an error.
+            indexes_in_table_info: Whether to include indexes in the table info.
         """
         self._conn = clickhouse_connect.get_client(
             host=host, port=port, user=user, password=password, database=database,
         )
 
+        self._database = database
         self._indexes_in_table_info = indexes_in_table_info
         self._sample_rows_in_table_info = sample_rows_in_table_info
         self._include_tables = set(include_tables) if include_tables else set()
@@ -116,7 +119,7 @@ class ClickHouseDataBase:
             table_info = f"{str(table_column_names)}"
             
             if self._custom_table_info and table_name in self._custom_table_info:
-                tables.append(self._custom_table_info[table_name])
+                tables.append(str(self._custom_table_info[table_name]))
                 continue
 
             has_extra_info = (
@@ -125,13 +128,23 @@ class ClickHouseDataBase:
             if has_extra_info:
                 table_info += "\n\n/*"
             if self._indexes_in_table_info:
-                indexes_query = f"SELECT * FROM system.parts WHERE database = '{table_name.split('.')[0]}' AND table = '{table_name.split('.')[1]}' AND name LIKE '%skp%' ORDER BY part"
-                indexes_result = self._conn.command(indexes_query)
+                indexes_query = f"SELECT name FROM system.columns WHERE database = '{self._database}' AND table = '{table_name}' AND is_in_primary_key=1"
+                indexes_result = self._conn.query(indexes_query)
                 indexes = ""
-                for row in indexes_result:
-                    indexes += f"ALTER TABLE {table_name} ATTACH PART '{row['name']}'"
+                for column in indexes_result.result_columns:
+                    indexes += f"Primary keys are {column}\n"
                 table_info += f"\n{indexes}\n"
 
+            if self._sample_rows_in_table_info:
+                try: 
+                    sample_query = f"SELECT * FROM {table_name} SAMPLE 0.3 LIMIT {self._sample_rows_in_table_info}"
+                    sample_result = self._conn.query(sample_query)
+                    columns = [column for column in sample_result.column_names]
+                    rows = [tuple(row) for row in sample_result.result_rows]
+                    sample_rows = "\n".join([str(row) for row in rows])
+                    table_info += f"\n\n-- Sample Rows:\n-- {', '.join(columns)}\n{sample_rows}\n"
+                except Exception:
+                    print(f"Table {table_name} cannot be sampled. Check the database connection parameters and remove the `sample_rows_in_table_info` parameter or set it to 0.")
             if has_extra_info:
                 table_info += "*/"
             tables.append(table_info)
