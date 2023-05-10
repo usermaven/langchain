@@ -31,7 +31,7 @@ class ClickHouseDataBase:
             password: The password to use for authentication.
             include_tables: A list of table names to include in the usable tables.
             ignore_tables: A list of table names to ignore in the usable tables.
-            custom_table_info: A dictionary mapping table names to custom table info. This will overwrite the default table info.
+            custom_table_info: A dictionary mapping table names to custom table info. This will overwrite the default table info. Example here: https://python.langchain.com/en/latest/modules/chains/examples/sqlite.html#custom-table-info 
             sample_rows_in_table_info: The number of sample rows to include in the table info. The table must have sampling enabled or this will throw an error.
             indexes_in_table_info: Whether to include indexes in the table info.
         """
