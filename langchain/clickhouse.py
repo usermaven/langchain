@@ -190,8 +190,7 @@ class ClickHouseDataBase:
     def get_client(
         cls, host: str, port: int, user: str, password: str, database: str, **kwargs: Any
     ) -> ClickHouseDataBase:
-        """Construct a SQLAlchemy engine from URI."""
-        # _engine_args = engine_args or {}
+        """Create a clickhouse connection from the parameters."""
         client = clickhouse_connect.get_client(host, user, port, password, database, **kwargs)
         return client
     
