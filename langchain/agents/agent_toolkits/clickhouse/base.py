@@ -7,6 +7,7 @@ from langchain.agents.agent_toolkits.clickhouse.toolkit import ClickHouseDatabas
 from langchain.agents.mrkl.base import ZeroShotAgent
 from langchain.agents.mrkl.prompt import FORMAT_INSTRUCTIONS
 from langchain.callbacks.base import BaseCallbackManager
+from langchain.memory import ConversationBufferMemory
 from langchain.chains.llm import LLMChain
 from langchain.llms.base import BaseLLM
 
@@ -41,7 +42,7 @@ def create_clickhouse_agent(
         callback_manager=callback_manager,
     )
     tool_names = [tool.name for tool in tools]
-    agent = ZeroShotAgent(llm_chain=llm_chain, allowed_tools=tool_names, **kwargs)
+    agent = ZeroShotAgent(llm_chain=llm_chain, allowed_tools=tool_names, memory=ConversationBufferMemory(memory_key="chat_history", input_key='input', output_key="output"),  **kwargs)
     return AgentExecutor.from_agent_and_tools(
         agent=agent,
         tools=tools,
@@ -49,4 +50,5 @@ def create_clickhouse_agent(
         max_iterations=max_iterations,
         max_execution_time=max_execution_time,
         early_stopping_method=early_stopping_method,
+        return_intermediate_steps=True,
     )

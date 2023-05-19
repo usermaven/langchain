@@ -33,6 +33,7 @@ class QueryClickHouseDataBaseTool(BaseClickHouseDatabaseTool, BaseTool):
     Input to this tool is a detailed and correct ClickHouse query, output is a result from the database.
     If the query is not correct, an error message will be returned.
     If an error is returned, rewrite the query, check the query, and try again.
+    If a missing columns error is returned, check the schema of the table with schema_clickhouse_db and try again.
     """
 
     def _run(self, query: str) -> str:
