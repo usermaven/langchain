@@ -24,6 +24,7 @@ def create_clickhouse_agent(
     max_execution_time: Optional[float] = None,
     early_stopping_method: str = "force",
     verbose: bool = False,
+    return_intermediate_steps: bool = False,
     **kwargs: Any,
 ) -> AgentExecutor:
     """Construct a ClickHouse agent from an LLM and tools."""
@@ -50,5 +51,5 @@ def create_clickhouse_agent(
         max_iterations=max_iterations,
         max_execution_time=max_execution_time,
         early_stopping_method=early_stopping_method,
-        return_intermediate_steps=True,
+        return_intermediate_steps=return_intermediate_steps,
     )
