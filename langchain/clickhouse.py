@@ -137,7 +137,7 @@ class ClickHouseDataBase:
 
             if self._sample_rows_in_table_info:
                 try: 
-                    sample_query = f"SELECT * FROM {table_name} SAMPLE 0.3 LIMIT {self._sample_rows_in_table_info}"
+                    sample_query = f"SELECT * FROM {table_name} LIMIT {self._sample_rows_in_table_info}"
                     sample_result = self._conn.query(sample_query)
                     columns = [column for column in sample_result.column_names]
                     rows = [tuple(row) for row in sample_result.result_rows]
