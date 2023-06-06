@@ -1,6 +1,7 @@
 """Clickhouse Agent."""
 from typing import Any, List, Optional
 
+from langchain.agents.agent_types import AgentType
 from langchain.agents.agent import AgentExecutor
 from langchain.agents.agent_toolkits.clickhouse.prompt import CLICKHOUSE_PREFIX, CLICKHOUSE_SUFFIX
 from langchain.agents.agent_toolkits.clickhouse.toolkit import ClickHouseDatabaseToolkit
@@ -9,10 +10,11 @@ from langchain.agents.mrkl.prompt import FORMAT_INSTRUCTIONS
 from langchain.callbacks.base import BaseCallbackManager
 from langchain.memory import ConversationBufferMemory
 from langchain.chains.llm import LLMChain
-from langchain.llms.base import BaseLLM
+# from langchain.llms.base import BaseLLM
+from langchain.chat_models.base import BaseChatModel
 
 def create_clickhouse_agent(
-    llm: BaseLLM,
+    llm: BaseChatModel,
     toolkit: ClickHouseDatabaseToolkit,
     callback_manager: Optional[BaseCallbackManager] = None,
     prefix: str = CLICKHOUSE_PREFIX,
@@ -43,7 +45,12 @@ def create_clickhouse_agent(
         callback_manager=callback_manager,
     )
     tool_names = [tool.name for tool in tools]
-    agent = ZeroShotAgent(llm_chain=llm_chain, allowed_tools=tool_names, memory=ConversationBufferMemory(memory_key="chat_history", input_key='input', output_key="output"),  **kwargs)
+    agent = ZeroShotAgent(
+        llm_chain=llm_chain, 
+        allowed_tools=tool_names, 
+        memory=ConversationBufferMemory(memory_key="chat_history", input_key='input', output_key="output"),
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        **kwargs)
     return AgentExecutor.from_agent_and_tools(
         agent=agent,
         tools=tools,
