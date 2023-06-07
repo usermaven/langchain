@@ -10,11 +10,11 @@ from langchain.agents.mrkl.prompt import FORMAT_INSTRUCTIONS
 from langchain.callbacks.base import BaseCallbackManager
 from langchain.memory import ConversationBufferMemory
 from langchain.chains.llm import LLMChain
-# from langchain.llms.base import BaseLLM
-from langchain.chat_models.base import BaseChatModel
+from langchain.llms.base import BaseLLM
+# from langchain.chat_models.base import BaseChatModel
 
 def create_clickhouse_agent(
-    llm: BaseChatModel,
+    llm: BaseLLM,
     toolkit: ClickHouseDatabaseToolkit,
     callback_manager: Optional[BaseCallbackManager] = None,
     prefix: str = CLICKHOUSE_PREFIX,
