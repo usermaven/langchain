@@ -106,7 +106,7 @@ def wandb_tracing_enabled(
 
 @contextmanager
 def tracing_v2_enabled(
-    session_name: Optional[str] = None,
+    project_name: Optional[str] = None,
     *,
     example_id: Optional[Union[str, UUID]] = None,
 ) -> Generator[None, None, None]:
@@ -120,7 +120,7 @@ def tracing_v2_enabled(
         example_id = UUID(example_id)
     cb = LangChainTracer(
         example_id=example_id,
-        session_name=session_name,
+        project_name=project_name,
     )
     tracing_v2_callback_var.set(cb)
     yield
@@ -131,12 +131,12 @@ def tracing_v2_enabled(
 def trace_as_chain_group(
     group_name: str,
     *,
-    session_name: Optional[str] = None,
+    project_name: Optional[str] = None,
     example_id: Optional[Union[str, UUID]] = None,
 ) -> Generator[CallbackManager, None, None]:
     """Get a callback manager for a chain group in a context manager."""
     cb = LangChainTracer(
-        session_name=session_name,
+        project_name=project_name,
         example_id=example_id,
     )
     cm = CallbackManager.configure(
@@ -152,12 +152,12 @@ def trace_as_chain_group(
 async def atrace_as_chain_group(
     group_name: str,
     *,
-    session_name: Optional[str] = None,
+    project_name: Optional[str] = None,
     example_id: Optional[Union[str, UUID]] = None,
 ) -> AsyncGenerator[AsyncCallbackManager, None]:
     """Get a callback manager for a chain group in a context manager."""
     cb = LangChainTracer(
-        session_name=session_name,
+        project_name=project_name,
         example_id=example_id,
     )
     cm = AsyncCallbackManager.configure(
@@ -200,11 +200,15 @@ def _handle_event(
                     **kwargs,
                 )
             else:
-                logger.warning(f"Error in {event_name} callback: {e}")
+                logger.warning(
+                    f"Error in {handler.__class__.__name__}.{event_name} callback: {e}"
+                )
         except Exception as e:
+            logger.warning(
+                f"Error in {handler.__class__.__name__}.{event_name} callback: {e}"
+            )
             if handler.raise_error:
                 raise e
-            logging.warning(f"Error in {event_name} callback: {e}")
 
 
 async def _ahandle_event_for_handler(
@@ -220,9 +224,12 @@ async def _ahandle_event_for_handler(
             if asyncio.iscoroutinefunction(event):
                 await event(*args, **kwargs)
             else:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, functools.partial(event, *args, **kwargs)
-                )
+                if handler.run_inline:
+                    event(*args, **kwargs)
+                else:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, functools.partial(event, *args, **kwargs)
+                    )
     except NotImplementedError as e:
         if event_name == "on_chat_model_start":
             message_strings = [get_buffer_string(m) for m in args[1]]
@@ -236,9 +243,15 @@ async def _ahandle_event_for_handler(
                 **kwargs,
             )
         else:
-            logger.warning(f"Error in {event_name} callback: {e}")
+            logger.warning(
+                f"Error in {handler.__class__.__name__}.{event_name} callback: {e}"
+            )
     except Exception as e:
-        logger.warning(f"Error in {event_name} callback: {e}")
+        logger.warning(
+            f"Error in {handler.__class__.__name__}.{event_name} callback: {e}"
+        )
+        if handler.raise_error:
+            raise e
 
 
 async def _ahandle_event(
@@ -249,12 +262,17 @@ async def _ahandle_event(
     **kwargs: Any,
 ) -> None:
     """Generic event handler for AsyncCallbackManager."""
+    for handler in [h for h in handlers if h.run_inline]:
+        await _ahandle_event_for_handler(
+            handler, event_name, ignore_condition_name, *args, **kwargs
+        )
     await asyncio.gather(
         *(
             _ahandle_event_for_handler(
                 handler, event_name, ignore_condition_name, *args, **kwargs
             )
             for handler in handlers
+            if not handler.run_inline
         )
     )
 
@@ -267,21 +285,32 @@ class BaseRunManager(RunManagerMixin):
 
     def __init__(
         self,
+        *,
         run_id: UUID,
         handlers: List[BaseCallbackHandler],
         inheritable_handlers: List[BaseCallbackHandler],
         parent_run_id: Optional[UUID] = None,
+        tags: List[str],
+        inheritable_tags: List[str],
     ) -> None:
         """Initialize run manager."""
         self.run_id = run_id
         self.handlers = handlers
         self.inheritable_handlers = inheritable_handlers
+        self.tags = tags
+        self.inheritable_tags = inheritable_tags
         self.parent_run_id = parent_run_id
 
     @classmethod
     def get_noop_manager(cls: Type[BRM]) -> BRM:
         """Return a manager that doesn't perform any operations."""
-        return cls(uuid4(), [], [])
+        return cls(
+            run_id=uuid4(),
+            handlers=[],
+            inheritable_handlers=[],
+            tags=[],
+            inheritable_tags=[],
+        )
 
 
 class RunManager(BaseRunManager):
@@ -423,10 +452,13 @@ class AsyncCallbackManagerForLLMRun(AsyncRunManager, LLMManagerMixin):
 class CallbackManagerForChainRun(RunManager, ChainManagerMixin):
     """Callback manager for chain run."""
 
-    def get_child(self) -> CallbackManager:
+    def get_child(self, tag: Optional[str] = None) -> CallbackManager:
         """Get a child callback manager."""
-        manager = CallbackManager([], parent_run_id=self.run_id)
+        manager = CallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
+        manager.add_tags(self.inheritable_tags)
+        if tag is not None:
+            manager.add_tags([tag], False)
         return manager
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs: Any) -> None:
@@ -485,10 +517,13 @@ class CallbackManagerForChainRun(RunManager, ChainManagerMixin):
 class AsyncCallbackManagerForChainRun(AsyncRunManager, ChainManagerMixin):
     """Async callback manager for chain run."""
 
-    def get_child(self) -> AsyncCallbackManager:
+    def get_child(self, tag: Optional[str] = None) -> AsyncCallbackManager:
         """Get a child callback manager."""
-        manager = AsyncCallbackManager([], parent_run_id=self.run_id)
+        manager = AsyncCallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
+        manager.add_tags(self.inheritable_tags)
+        if tag is not None:
+            manager.add_tags([tag], False)
         return manager
 
     async def on_chain_end(self, outputs: Dict[str, Any], **kwargs: Any) -> None:
@@ -547,10 +582,13 @@ class AsyncCallbackManagerForChainRun(AsyncRunManager, ChainManagerMixin):
 class CallbackManagerForToolRun(RunManager, ToolManagerMixin):
     """Callback manager for tool run."""
 
-    def get_child(self) -> CallbackManager:
+    def get_child(self, tag: Optional[str] = None) -> CallbackManager:
         """Get a child callback manager."""
-        manager = CallbackManager([], parent_run_id=self.run_id)
+        manager = CallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
+        manager.add_tags(self.inheritable_tags)
+        if tag is not None:
+            manager.add_tags([tag], False)
         return manager
 
     def on_tool_end(
@@ -589,10 +627,13 @@ class CallbackManagerForToolRun(RunManager, ToolManagerMixin):
 class AsyncCallbackManagerForToolRun(AsyncRunManager, ToolManagerMixin):
     """Async callback manager for tool run."""
 
-    def get_child(self) -> AsyncCallbackManager:
+    def get_child(self, tag: Optional[str] = None) -> AsyncCallbackManager:
         """Get a child callback manager."""
-        manager = AsyncCallbackManager([], parent_run_id=self.run_id)
+        manager = AsyncCallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
+        manager.add_tags(self.inheritable_tags)
+        if tag is not None:
+            manager.add_tags([tag], False)
         return manager
 
     async def on_tool_end(self, output: str, **kwargs: Any) -> None:
@@ -631,54 +672,72 @@ class CallbackManager(BaseCallbackManager):
         self,
         serialized: Dict[str, Any],
         prompts: List[str],
-        run_id: Optional[UUID] = None,
         **kwargs: Any,
-    ) -> CallbackManagerForLLMRun:
+    ) -> List[CallbackManagerForLLMRun]:
         """Run when LLM starts running."""
-        if run_id is None:
-            run_id = uuid4()
+        managers = []
+        for prompt in prompts:
+            run_id_ = uuid4()
+            _handle_event(
+                self.handlers,
+                "on_llm_start",
+                "ignore_llm",
+                serialized,
+                [prompt],
+                run_id=run_id_,
+                parent_run_id=self.parent_run_id,
+                tags=self.tags,
+                **kwargs,
+            )
 
-        _handle_event(
-            self.handlers,
-            "on_llm_start",
-            "ignore_llm",
-            serialized,
-            prompts,
-            run_id=run_id,
-            parent_run_id=self.parent_run_id,
-            **kwargs,
-        )
+            managers.append(
+                CallbackManagerForLLMRun(
+                    run_id=run_id_,
+                    handlers=self.handlers,
+                    inheritable_handlers=self.inheritable_handlers,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    inheritable_tags=self.inheritable_tags,
+                )
+            )
 
-        return CallbackManagerForLLMRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
-        )
+        return managers
 
     def on_chat_model_start(
         self,
         serialized: Dict[str, Any],
         messages: List[List[BaseMessage]],
-        run_id: Optional[UUID] = None,
         **kwargs: Any,
-    ) -> CallbackManagerForLLMRun:
+    ) -> List[CallbackManagerForLLMRun]:
         """Run when LLM starts running."""
-        if run_id is None:
-            run_id = uuid4()
-        _handle_event(
-            self.handlers,
-            "on_chat_model_start",
-            "ignore_chat_model",
-            serialized,
-            messages,
-            run_id=run_id,
-            parent_run_id=self.parent_run_id,
-            **kwargs,
-        )
 
-        # Re-use the LLM Run Manager since the outputs are treated
-        # the same for now
-        return CallbackManagerForLLMRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
-        )
+        managers = []
+        for message_list in messages:
+            run_id_ = uuid4()
+            _handle_event(
+                self.handlers,
+                "on_chat_model_start",
+                "ignore_chat_model",
+                serialized,
+                [message_list],
+                run_id=run_id_,
+                parent_run_id=self.parent_run_id,
+                tags=self.tags,
+                **kwargs,
+            )
+
+            managers.append(
+                CallbackManagerForLLMRun(
+                    run_id=run_id_,
+                    handlers=self.handlers,
+                    inheritable_handlers=self.inheritable_handlers,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    inheritable_tags=self.inheritable_tags,
+                )
+            )
+
+        return managers
 
     def on_chain_start(
         self,
@@ -699,11 +758,17 @@ class CallbackManager(BaseCallbackManager):
             inputs,
             run_id=run_id,
             parent_run_id=self.parent_run_id,
+            tags=self.tags,
             **kwargs,
         )
 
         return CallbackManagerForChainRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
+            run_id=run_id,
+            handlers=self.handlers,
+            inheritable_handlers=self.inheritable_handlers,
+            parent_run_id=self.parent_run_id,
+            tags=self.tags,
+            inheritable_tags=self.inheritable_tags,
         )
 
     def on_tool_start(
@@ -726,11 +791,17 @@ class CallbackManager(BaseCallbackManager):
             input_str,
             run_id=run_id,
             parent_run_id=self.parent_run_id,
+            tags=self.tags,
             **kwargs,
         )
 
         return CallbackManagerForToolRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
+            run_id=run_id,
+            handlers=self.handlers,
+            inheritable_handlers=self.inheritable_handlers,
+            parent_run_id=self.parent_run_id,
+            tags=self.tags,
+            inheritable_tags=self.inheritable_tags,
         )
 
     @classmethod
@@ -739,9 +810,18 @@ class CallbackManager(BaseCallbackManager):
         inheritable_callbacks: Callbacks = None,
         local_callbacks: Callbacks = None,
         verbose: bool = False,
+        inheritable_tags: Optional[List[str]] = None,
+        local_tags: Optional[List[str]] = None,
     ) -> CallbackManager:
         """Configure the callback manager."""
-        return _configure(cls, inheritable_callbacks, local_callbacks, verbose)
+        return _configure(
+            cls,
+            inheritable_callbacks,
+            local_callbacks,
+            verbose,
+            inheritable_tags,
+            local_tags,
+        )
 
 
 class AsyncCallbackManager(BaseCallbackManager):
@@ -756,52 +836,84 @@ class AsyncCallbackManager(BaseCallbackManager):
         self,
         serialized: Dict[str, Any],
         prompts: List[str],
-        run_id: Optional[UUID] = None,
         **kwargs: Any,
-    ) -> AsyncCallbackManagerForLLMRun:
+    ) -> List[AsyncCallbackManagerForLLMRun]:
         """Run when LLM starts running."""
-        if run_id is None:
-            run_id = uuid4()
 
-        await _ahandle_event(
-            self.handlers,
-            "on_llm_start",
-            "ignore_llm",
-            serialized,
-            prompts,
-            run_id=run_id,
-            parent_run_id=self.parent_run_id,
-            **kwargs,
-        )
+        tasks = []
+        managers = []
 
-        return AsyncCallbackManagerForLLMRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
-        )
+        for prompt in prompts:
+            run_id_ = uuid4()
+
+            tasks.append(
+                _ahandle_event(
+                    self.handlers,
+                    "on_llm_start",
+                    "ignore_llm",
+                    serialized,
+                    [prompt],
+                    run_id=run_id_,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    **kwargs,
+                )
+            )
+
+            managers.append(
+                AsyncCallbackManagerForLLMRun(
+                    run_id=run_id_,
+                    handlers=self.handlers,
+                    inheritable_handlers=self.inheritable_handlers,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    inheritable_tags=self.inheritable_tags,
+                )
+            )
+
+        await asyncio.gather(*tasks)
+
+        return managers
 
     async def on_chat_model_start(
         self,
         serialized: Dict[str, Any],
         messages: List[List[BaseMessage]],
-        run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        if run_id is None:
-            run_id = uuid4()
+        tasks = []
+        managers = []
 
-        await _ahandle_event(
-            self.handlers,
-            "on_chat_model_start",
-            "ignore_chat_model",
-            serialized,
-            messages,
-            run_id=run_id,
-            parent_run_id=self.parent_run_id,
-            **kwargs,
-        )
+        for message_list in messages:
+            run_id_ = uuid4()
 
-        return AsyncCallbackManagerForLLMRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
-        )
+            tasks.append(
+                _ahandle_event(
+                    self.handlers,
+                    "on_chat_model_start",
+                    "ignore_chat_model",
+                    serialized,
+                    [message_list],
+                    run_id=run_id_,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    **kwargs,
+                )
+            )
+
+            managers.append(
+                AsyncCallbackManagerForLLMRun(
+                    run_id=run_id_,
+                    handlers=self.handlers,
+                    inheritable_handlers=self.inheritable_handlers,
+                    parent_run_id=self.parent_run_id,
+                    tags=self.tags,
+                    inheritable_tags=self.inheritable_tags,
+                )
+            )
+
+        await asyncio.gather(*tasks)
+        return managers
 
     async def on_chain_start(
         self,
@@ -822,11 +934,17 @@ class AsyncCallbackManager(BaseCallbackManager):
             inputs,
             run_id=run_id,
             parent_run_id=self.parent_run_id,
+            tags=self.tags,
             **kwargs,
         )
 
         return AsyncCallbackManagerForChainRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
+            run_id=run_id,
+            handlers=self.handlers,
+            inheritable_handlers=self.inheritable_handlers,
+            parent_run_id=self.parent_run_id,
+            tags=self.tags,
+            inheritable_tags=self.inheritable_tags,
         )
 
     async def on_tool_start(
@@ -849,11 +967,17 @@ class AsyncCallbackManager(BaseCallbackManager):
             input_str,
             run_id=run_id,
             parent_run_id=self.parent_run_id,
+            tags=self.tags,
             **kwargs,
         )
 
         return AsyncCallbackManagerForToolRun(
-            run_id, self.handlers, self.inheritable_handlers, self.parent_run_id
+            run_id=run_id,
+            handlers=self.handlers,
+            inheritable_handlers=self.inheritable_handlers,
+            parent_run_id=self.parent_run_id,
+            tags=self.tags,
+            inheritable_tags=self.inheritable_tags,
         )
 
     @classmethod
@@ -862,9 +986,18 @@ class AsyncCallbackManager(BaseCallbackManager):
         inheritable_callbacks: Callbacks = None,
         local_callbacks: Callbacks = None,
         verbose: bool = False,
+        inheritable_tags: Optional[List[str]] = None,
+        local_tags: Optional[List[str]] = None,
     ) -> AsyncCallbackManager:
         """Configure the callback manager."""
-        return _configure(cls, inheritable_callbacks, local_callbacks, verbose)
+        return _configure(
+            cls,
+            inheritable_callbacks,
+            local_callbacks,
+            verbose,
+            inheritable_tags,
+            local_tags,
+        )
 
 
 T = TypeVar("T", CallbackManager, AsyncCallbackManager)
@@ -885,9 +1018,11 @@ def _configure(
     inheritable_callbacks: Callbacks = None,
     local_callbacks: Callbacks = None,
     verbose: bool = False,
+    inheritable_tags: Optional[List[str]] = None,
+    local_tags: Optional[List[str]] = None,
 ) -> T:
     """Configure the callback manager."""
-    callback_manager = callback_manager_cls([])
+    callback_manager = callback_manager_cls(handlers=[])
     if inheritable_callbacks or local_callbacks:
         if isinstance(inheritable_callbacks, list) or inheritable_callbacks is None:
             inheritable_callbacks_ = inheritable_callbacks or []
@@ -900,6 +1035,8 @@ def _configure(
                 handlers=inheritable_callbacks.handlers,
                 inheritable_handlers=inheritable_callbacks.inheritable_handlers,
                 parent_run_id=inheritable_callbacks.parent_run_id,
+                tags=inheritable_callbacks.tags,
+                inheritable_tags=inheritable_callbacks.inheritable_tags,
             )
         local_handlers_ = (
             local_callbacks
@@ -908,6 +1045,9 @@ def _configure(
         )
         for handler in local_handlers_:
             callback_manager.add_handler(handler, False)
+    if inheritable_tags or local_tags:
+        callback_manager.add_tags(inheritable_tags or [])
+        callback_manager.add_tags(local_tags or [], False)
 
     tracer = tracing_callback_var.get()
     wandb_tracer = wandb_tracing_callback_var.get()
@@ -925,10 +1065,10 @@ def _configure(
     tracing_v2_enabled_ = (
         env_var_is_set("LANGCHAIN_TRACING_V2") or tracer_v2 is not None
     )
-    tracer_session = os.environ.get("LANGCHAIN_SESSION")
+    tracer_project = os.environ.get(
+        "LANGCHAIN_PROJECT", os.environ.get("LANGCHAIN_SESSION", "default")
+    )
     debug = _get_debug()
-    if tracer_session is None:
-        tracer_session = "default"
     if (
         verbose
         or debug
@@ -958,7 +1098,7 @@ def _configure(
                 callback_manager.add_handler(tracer, True)
             else:
                 handler = LangChainTracerV1()
-                handler.load_session(tracer_session)
+                handler.load_session(tracer_project)
                 callback_manager.add_handler(handler, True)
         if wandb_tracing_enabled_ and not any(
             isinstance(handler, WandbTracer) for handler in callback_manager.handlers
@@ -976,7 +1116,7 @@ def _configure(
                 callback_manager.add_handler(tracer_v2, True)
             else:
                 try:
-                    handler = LangChainTracer(session_name=tracer_session)
+                    handler = LangChainTracer(project_name=tracer_project)
                     callback_manager.add_handler(handler, True)
                 except Exception as e:
                     logger.warning(
